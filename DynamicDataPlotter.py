@@ -16,6 +16,23 @@ import warnings
 import webbrowser
 import random
 
+import matplotlib.pyplot as plt
+import platform
+
+# Detect OS
+system = platform.system()
+
+# Choose default Korean-safe font based on OS
+if system == 'Darwin':  # macOS
+    plt.rcParams['font.family'] = 'AppleGothic'
+elif system == 'Windows':
+    plt.rcParams['font.family'] = 'Malgun Gothic'
+else:  # Linux or unknown
+    plt.rcParams['font.family'] = 'DejaVu Sans'  # basic fallback, may not support Hangul
+
+plt.rcParams['axes.unicode_minus'] = False  # fix minus sign issue
+
+
 def compute_aic(n, rss, k):
     return n * np.log(rss / n) + 2 * k
 
@@ -76,6 +93,10 @@ start_date_vars = {}
 end_date_vars = {}
 start_time_vars = {}
 end_time_vars = {}
+start_hour_vars = {}
+start_min_vars  = {}
+end_hour_vars   = {}
+end_min_vars    = {}
 original_xlim = None
 original_ylim = None
 annotations = []
@@ -853,6 +874,21 @@ def add_polynomial_fit(ax, X, Y, label, degree, is_timestamp, color):
     except Exception as e:
         print(f"Fit error: {e}")
 
+def apply_time_grid(ax):
+    # Only for Timestamp x-axis
+    if x_var.get() != 'Timestamp' or not ax:
+        return
+    try:
+        h = int(grid_interval.get())
+    except Exception:
+        h = 1
+    h = max(1, h)
+
+    locator = mdates.HourLocator(interval=h)
+    # Show date + hour when < 24h steps, otherwise just date
+    fmt = '%Y-%m-%d\n%H:%M' if h < 24 else '%Y-%m-%d'
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter(fmt))
 
 def plot_all():
     global current_fig, current_canvas, original_xlim, original_ylim, canvas, toolbar, traces_added, date_ui_drawn
@@ -879,36 +915,45 @@ def plot_all():
         # Ensure time filter variables exist
         if i not in start_date_vars:
             start_date_vars[i] = tk.StringVar()
-            end_date_vars[i] = tk.StringVar()
-            start_time_vars[i] = tk.StringVar()
-            end_time_vars[i] = tk.StringVar()
+            end_date_vars[i]   = tk.StringVar()
+            start_time_vars[i] = tk.StringVar()  # legacy; unused after HH/MM split
+            end_time_vars[i]   = tk.StringVar()  # legacy; unused after HH/MM split
+
+        # Ensure hour/minute vars exist
+        if i not in start_hour_vars: start_hour_vars[i] = tk.StringVar()
+        if i not in start_min_vars:  start_min_vars[i]  = tk.StringVar()
+        if i not in end_hour_vars:   end_hour_vars[i]   = tk.StringVar()
+        if i not in end_min_vars:    end_min_vars[i]    = tk.StringVar()
 
         # Default date/time dropdown values
         try:
-            df_dates = pd.to_datetime(df['Timestamp'], errors='coerce').dropna().dt.date
-            options = sorted(df_dates.unique())
-            if not start_date_vars[i].get() and options:
-                start_date_vars[i].set(str(options[0]))
-            if not end_date_vars[i].get() and options:
-                end_date_vars[i].set(str(options[-1]))
+            ts = pd.to_datetime(df['Timestamp'], errors='coerce').dropna()
+            date_options = sorted(ts.dt.date.unique())
+            if not start_date_vars[i].get() and date_options:
+                start_date_vars[i].set(str(date_options[0]))
+            if not end_date_vars[i].get() and date_options:
+                end_date_vars[i].set(str(date_options[-1]))
 
-            times = df['Timestamp'].dt.strftime('%H:%M').unique()
-            times = sorted(set(t for t in times if pd.notna(t)))
-            if not start_time_vars[i].get() and times:
-                start_time_vars[i].set(times[0])
-            if not end_time_vars[i].get() and times:
-                end_time_vars[i].set(times[-1])
+            if not ts.empty:
+                first_ts, last_ts = ts.iloc[0], ts.iloc[-1]
+                if not start_hour_vars[i].get(): start_hour_vars[i].set(f"{first_ts.hour:02d}")
+                if not start_min_vars[i].get():  start_min_vars[i].set(f"{first_ts.minute:02d}")
+                if not end_hour_vars[i].get():   end_hour_vars[i].set(f"{last_ts.hour:02d}")
+                if not end_min_vars[i].get():    end_min_vars[i].set(f"{last_ts.minute:02d}")
         except Exception as e:
-            print(f"Dropdown default setup error (Dataset {i+1}):", e)
+            print(f"Dropdown init error (Dataset {i+1}):", e)
 
         # Apply time filtering
         try:
             if sync_all_dates.get():
-                start = pd.to_datetime(global_start_date.get() + ' ' + start_time_vars[i].get())
-                end = pd.to_datetime(global_end_date.get() + ' ' + end_time_vars[i].get())
+                start_str = f"{global_start_date.get()} {start_hour_vars[i].get()}:{start_min_vars[i].get()}"
+                end_str   = f"{global_end_date.get()} {end_hour_vars[i].get()}:{end_min_vars[i].get()}"
             else:
-                start = pd.to_datetime(start_date_vars[i].get() + ' ' + start_time_vars[i].get())
-                end = pd.to_datetime(end_date_vars[i].get() + ' ' + end_time_vars[i].get())
+                start_str = f"{start_date_vars[i].get()} {start_hour_vars[i].get()}:{start_min_vars[i].get()}"
+                end_str   = f"{end_date_vars[i].get()} {end_hour_vars[i].get()}:{end_min_vars[i].get()}"
+
+            start = pd.to_datetime(start_str, errors='coerce')
+            end   = pd.to_datetime(end_str, errors='coerce')
 
             df = df[(df['Timestamp'] >= start) & (df['Timestamp'] <= end)]
         except Exception as e:
@@ -950,7 +995,6 @@ def plot_all():
             scatter_plots.append((sc0, i, 'y', y_var.get()))
 
             if show_fit[i].get():
-                # choose best degree on the same plotted points
                 x_vals = (mdates.date2num(X[mask_y]) if is_ts
                           else pd.to_numeric(X[mask_y], errors='coerce'))
                 y_vals = y[mask_y]
@@ -960,7 +1004,6 @@ def plot_all():
                     best_deg = find_best_poly_degree_aic(x_vals[valid], y_vals[valid], max_deg=30)
                     fit_degree[i].set(best_deg)
 
-                    # Pass correctly filtered X/Y to the fit drawer
                     X_for_fit = X[mask_y][valid]
                     Y_for_fit = y[mask_y][valid]
 
@@ -997,8 +1040,7 @@ def plot_all():
 
     # Format x-axis
     if x_var.get() == 'Timestamp':
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=8, maxticks=12))
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d\n%H:%M'))
+        apply_time_grid(ax)
         fig.autofmt_xdate(rotation=45, ha='right')
     else:
         from matplotlib.ticker import MaxNLocator
@@ -1061,19 +1103,24 @@ def plot_all():
 
                 dates = sorted(set(pd.to_datetime(data_dfs[i]['Timestamp'], errors='coerce').dropna().dt.date))
                 tk.Label(dataset_time_frame, text="Start Date:").grid(row=0, column=0)
-                tk.OptionMenu(dataset_time_frame, start_date_vars[i], *dates).grid(row=0, column=1)
+                tk.OptionMenu(dataset_time_frame, start_date_vars[i], *dates).grid(row=0, column=1, sticky='w')
 
                 tk.Label(dataset_time_frame, text="End Date:").grid(row=1, column=0)
-                tk.OptionMenu(dataset_time_frame, end_date_vars[i], *dates).grid(row=1, column=1)
+                tk.OptionMenu(dataset_time_frame, end_date_vars[i], *dates).grid(row=1, column=1, sticky='w')
 
-                df_times = pd.to_datetime(data_dfs[i]['Timestamp'], errors='coerce').dropna().dt.strftime('%H:%M')
-                time_options = sorted(set(df_times))
+                # Time HH:MM selectors
+                hours = [f"{h:02d}" for h in range(24)]
+                mins  = [f"{m:02d}" for m in range(60)]
 
                 tk.Label(dataset_time_frame, text="Start Time:").grid(row=2, column=0)
-                tk.OptionMenu(dataset_time_frame, start_time_vars[i], *time_options).grid(row=2, column=1)
+                tk.OptionMenu(dataset_time_frame, start_hour_vars[i], *hours).grid(row=2, column=1, sticky='w')
+                tk.Label(dataset_time_frame, text=":").grid(row=2, column=2, sticky='w')
+                tk.OptionMenu(dataset_time_frame, start_min_vars[i], *mins).grid(row=2, column=3, sticky='w')
 
                 tk.Label(dataset_time_frame, text="End Time:").grid(row=3, column=0)
-                tk.OptionMenu(dataset_time_frame, end_time_vars[i], *time_options).grid(row=3, column=1)
+                tk.OptionMenu(dataset_time_frame, end_hour_vars[i], *hours).grid(row=3, column=1, sticky='w')
+                tk.Label(dataset_time_frame, text=":").grid(row=3, column=2, sticky='w')
+                tk.OptionMenu(dataset_time_frame, end_min_vars[i], *mins).grid(row=3, column=3, sticky='w')
 
         globals()["date_ui_drawn"] = True
 
@@ -1081,11 +1128,17 @@ def plot_all():
     status.set("Plot updated.")
 
 
+
 def add_trace_callbacks():
-    for var_dict in [start_date_vars, end_date_vars, start_time_vars, end_time_vars]:
+    for var_dict in [start_date_vars, end_date_vars, start_hour_vars, start_min_vars, end_hour_vars, end_min_vars]:
         for i in var_dict:
             var = var_dict[i]
-            var.trace_add("write", lambda *args, i=i: plot_all())
+            def cb(*args, i=i):
+                if suspend_traces:  # ignore changes while we’re initializing defaults
+                    return
+                schedule_plot()
+            var.trace_add("write", cb)
+
 
 def help_btn():
     url = "https://hward05.github.io/help-page-/"  # Replace with your actual help/documentation URL
